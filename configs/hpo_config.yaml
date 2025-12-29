@@ -1,0 +1,170 @@
+# Hyperparameter Optimization Configuration (Optuna)
+
+study_name: "tinyllm_hpo"
+storage: null  # Use in-memory, or sqlite:///tinyllm_hpo.db for persistence
+direction: maximize  # maximize F1 score
+n_trials: 100
+timeout: null  # No timeout, use n_trials
+n_jobs: 1  # Parallel trials (set to # of GPUs)
+
+# Optimization target
+metric_for_optimization: f1
+optimization_direction: maximize
+
+# Pruner (early stopping for unpromising trials)
+pruner:
+  enabled: true
+  type: median  # median, hyperband, successive_halving
+  n_startup_trials: 10
+  n_warmup_steps: 5
+  interval_steps: 1
+
+# Sampler
+sampler:
+  type: tpe  # tpe, random, grid, cmaes
+  seed: 42
+  multivariate: true
+  warn_independent_sampling: true
+
+# Hyperparameter search space
+search_space:
+  # Learning rate
+  learning_rate:
+    type: loguniform
+    low: 1.0e-6
+    high: 1.0e-4
+  
+  # Batch size
+  per_device_train_batch_size:
+    type: categorical
+    choices: [16, 32, 64]
+  
+  # Gradient accumulation
+  gradient_accumulation_steps:
+    type: categorical
+    choices: [2, 4, 8]
+  
+  # Weight decay
+  weight_decay:
+    type: loguniform
+    low: 1.0e-4
+    high: 1.0e-1
+  
+  # Warmup ratio
+  warmup_ratio:
+    type: uniform
+    low: 0.05
+    high: 0.15
+  
+  # Dropout
+  dropout:
+    type: uniform
+    low: 0.05
+    high: 0.3
+  
+  # Label smoothing
+  label_smoothing:
+    type: uniform
+    low: 0.0
+    high: 0.2
+  
+  # Focal loss parameters
+  focal_alpha:
+    type: uniform
+    low: 0.1
+    high: 0.5
+  
+  focal_gamma:
+    type: uniform
+    low: 1.0
+    high: 3.0
+  
+  # Router threshold
+  router_complexity_threshold:
+    type: uniform
+    low: 0.5
+    high: 0.8
+  
+  # MoE parameters
+  num_experts:
+    type: categorical
+    choices: [4, 6, 8]
+  
+  num_experts_per_token:
+    type: categorical
+    choices: [1, 2]
+  
+  expert_capacity_factor:
+    type: uniform
+    low: 1.0
+    high: 1.5
+  
+  # Adversarial training
+  adversarial_epsilon:
+    type: loguniform
+    low: 0.001
+    high: 0.1
+  
+  # Auxiliary loss weights
+  aux_loss_weight:
+    type: loguniform
+    low: 0.001
+    high: 0.1
+  
+  router_loss_weight:
+    type: uniform
+    low: 0.05
+    high: 0.3
+  
+  # Hard negative weight
+  hard_negative_weight:
+    type: uniform
+    low: 1.0
+    high: 3.0
+
+# Fixed parameters (not optimized)
+fixed_params:
+  num_train_epochs: 3  # Shorter for HPO
+  eval_steps: 200
+  save_steps: 1000
+  logging_steps: 50
+  fp16: true
+  max_grad_norm: 1.0
+
+# Early stopping for individual trials
+trial_early_stopping:
+  enabled: true
+  patience: 5
+  min_delta: 0.001
+
+# Visualization
+visualization:
+  enabled: true
+  plot_optimization_history: true
+  plot_param_importances: true
+  plot_parallel_coordinate: true
+  plot_slice: true
+  plot_contour: true
+  save_dir: outputs/hpo_visualization
+
+# Best trial deployment
+deploy_best:
+  enabled: true
+  retrain_with_full_epochs: true  # Retrain best config for full epochs
+  full_epochs: 5
+  save_dir: checkpoints/hpo_best
+
+# Resource management
+resource_limits:
+  max_memory_gb: null  # Auto-detect
+  max_time_per_trial_hours: 4
+  checkpoint_pruning: true  # Delete checkpoints from pruned trials
+
+# Logging
+logging:
+  log_level: INFO
+  log_to_file: true
+  log_file: logs/hpo.log
+  wandb_project: tinyllm-hpo
+  track_individual_trials: true
+

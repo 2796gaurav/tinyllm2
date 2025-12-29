@@ -1,0 +1,272 @@
+# TinyLLM Guardrail Base Configuration
+# Target: 60-80M parameters, 66-80MB INT8, 86-90% PINT accuracy
+
+project_name: "tinyllm-guardrail"
+experiment_name: "dual-branch-v1"
+seed: 42
+
+# Model Architecture
+model:
+  vocab_size: 8000  # Pruned vocabulary
+  d_model: 384      # Hidden dimension
+  num_labels: 4     # benign, direct_injection, jailbreak, obfuscation
+  
+  # Embedding configuration
+  embedding:
+    char_vocab_size: 512  # Extended Unicode support
+    char_emb_dim: 64
+    char_cnn_kernels: [2, 3, 4, 5, 7]  # Multi-scale n-grams
+    char_cnn_channels: 128
+    pattern_detectors:
+      - flipattack
+      - homoglyph
+      - encryption
+      - encoding
+      - typoglycemia
+      - indirect_pi
+  
+  # Fast Branch (pattern-based, lightweight)
+  fast_branch:
+    num_layers: 4
+    num_heads: 4
+    intermediate_size: 768
+    pattern_bank_size: 300  # 100 hand-crafted + 200 learned
+    dropout: 0.1
+  
+  # Deep Branch (MoE-based, complex reasoning)
+  deep_branch:
+    num_layers: 8
+    num_heads: 4
+    intermediate_size: 768
+    num_experts: 8
+    num_experts_per_token: 2  # Top-2 routing
+    expert_capacity_factor: 1.25
+    dropout: 0.1
+  
+  # Adaptive Router
+  router:
+    hidden_dim: 128
+    complexity_threshold: 0.6  # 60% to fast, 40% to deep
+    use_learned_threshold: true
+  
+  # Bit-level response encoding
+  bit_encoding:
+    enabled: true
+    bits: 16
+    attack_type_bits: 4     # 0-15 categories
+    confidence_bits: 4      # 0-15 levels
+    severity_bits: 4        # 0-15 levels
+    action_bits: 4          # 0-15 actions
+
+# Data
+data:
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  max_length: 256
+  
+  # Dataset composition (total: 140K)
+  public_datasets:
+    pint: 4300
+    jailbreakbench: 4000
+    notinject: 340
+    guardset_x: 10000
+    wildguard: 20000
+    toxicchat: 10000
+    additional: 10000
+  
+  synthetic_attacks:
+    flipattack: 10000  # FCW, FCS, FWO
+    codechameleon: 6000
+    homoglyph: 5000
+    encoding: 5000
+    indirect_pi: 5000
+    character_injection: 5000
+    typoglycemia: 3000
+    hard_jailbreaks: 4000
+    multilingual: 4000
+  
+  hard_negatives:
+    benign_with_triggers: 15000
+    technical_docs: 5000
+    code_with_ignore: 5000
+    borderline_cases: 5000
+  
+  # Data augmentation
+  augmentation:
+    enabled: true
+    back_translation_languages: [es, fr, de, zh, ja, ko, ar, hi, pt, it]
+    paraphrase_ratio: 0.3
+    adversarial_perturbation: true
+    character_level_aug: true
+
+# Training
+training:
+  # Optimizer
+  optimizer: adamw
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+  max_grad_norm: 1.0
+  
+  # Learning rate schedule
+  lr_scheduler: linear_warmup_cosine
+  warmup_steps: 2000
+  warmup_ratio: 0.1
+  
+  # Training loop
+  num_train_epochs: 5
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 64
+  gradient_accumulation_steps: 4  # Effective batch: 128
+  
+  # Mixed precision
+  fp16: true
+  bf16: false  # Use if supported
+  
+  # Evaluation
+  evaluation_strategy: steps
+  eval_steps: 500
+  save_steps: 1000
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: f1
+  greater_is_better: true
+  
+  # Logging
+  logging_steps: 100
+  logging_first_step: true
+  report_to: [wandb, tensorboard]
+  
+  # Data loading
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+
+# Loss Function
+loss:
+  # Main classification loss
+  classification_loss: focal  # focal, cross_entropy, focal_tversky
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  
+  # Auxiliary losses
+  aux_loss_weight: 0.01  # MoE load balancing
+  router_loss_weight: 0.1  # Router optimization
+  pattern_loss_weight: 0.05  # Pattern detector calibration
+  
+  # Class weights (for imbalanced data)
+  class_weights: [0.5, 1.5, 2.0, 1.5]  # benign, injection, jailbreak, obfuscation
+
+# Adversarial Training
+adversarial:
+  enabled: true
+  start_epoch: 3  # Start after initial convergence
+  method: fgsm  # fgsm, pgd, trades
+  epsilon: 0.01
+  alpha: 0.001  # PGD step size
+  num_steps: 5  # PGD iterations
+  random_start: true
+
+# Quantization-Aware Training
+quantization:
+  enabled: true
+  start_epoch: 4
+  backend: fbgemm  # fbgemm (CPU), qnnpack (mobile)
+  quantize_layers: [linear, conv1d]
+  per_channel: true
+  symmetric: true
+
+# Regularization
+regularization:
+  dropout: 0.1
+  attention_dropout: 0.1
+  hidden_dropout: 0.1
+  label_smoothing: 0.1
+  
+  # Over-defense mitigation
+  hard_negative_weight: 1.5  # Upweight benign samples with triggers
+  calibration_method: temperature_scaling
+  target_fpr: 0.10  # <10% false positive rate
+
+# Checkpointing
+checkpointing:
+  checkpoint_dir: checkpoints
+  save_optimizer: true
+  save_scheduler: true
+  resume_from_checkpoint: null  # Path to resume from
+
+# Monitoring
+monitoring:
+  track_gradients: true
+  track_weights: true
+  track_activations: false  # Expensive
+  
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.001
+  
+  # Metrics to track
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1
+    - fpr  # False positive rate (critical)
+    - auc_roc
+    - attack_detection_rate  # By attack type
+    - routing_distribution  # Fast vs deep branch
+    - latency_p50
+    - latency_p95
+    - latency_p99
+
+# Hardware & Distributed Training
+hardware:
+  device: auto  # auto, cuda, cpu
+  multi_gpu: true
+  distributed_backend: nccl  # nccl, gloo
+  
+  # DeepSpeed (optional, for large-scale training)
+  deepspeed:
+    enabled: false
+    config_file: configs/deepspeed_config.json
+  
+  # Gradient checkpointing (memory saving)
+  gradient_checkpointing: false
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+
+# Colab-specific optimizations
+colab:
+  enabled: false  # Auto-detected if running in Colab
+  mount_drive: true
+  drive_base_path: /content/drive/MyDrive/tinyllm-guardrail
+  
+  # Free Colab optimizations
+  use_fp16: true
+  reduce_batch_size_factor: 0.5  # For memory constraints
+  checkpoint_to_drive: true
+  
+  # Colab Pro optimizations
+  use_bf16: false  # A100 only
+  use_tf32: true
+
+# Paths
+paths:
+  data_dir: data
+  cache_dir: .cache
+  output_dir: outputs
+  log_dir: logs
+  checkpoint_dir: checkpoints
+  results_dir: results
+
+# Random seed for reproducibility
+seeds:
+  python: 42
+  numpy: 42
+  torch: 42
+  transformers: 42
+
