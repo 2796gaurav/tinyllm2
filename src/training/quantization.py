@@ -5,7 +5,11 @@ INT8 (primary), INT4 (stretch goal)
 
 import torch
 import torch.nn as nn
-import torch.quantization as quant
+# Try newer API first, fallback to older
+try:
+    import torch.ao.quantization as quant
+except ImportError:
+    import torch.quantization as quant
 from typing import Optional
 import copy
 
@@ -35,11 +39,89 @@ class QuantizationAwareTrainer:
         Returns:
             model_prepared: Model with fake quantization nodes
         """
-        # Set quantization config
-        model.qconfig = quant.get_default_qat_qconfig(self.backend)
+        # CRITICAL: Convert model to FP32 before QAT
+        # QAT observers require FP32 tensors, not FP16
+        # Convert all parameters and buffers to FP32 explicitly
+        def convert_to_fp32(module):
+            """Recursively convert all parameters and buffers to FP32"""
+            for param in module.parameters():
+                if param.dtype == torch.float16:
+                    param.data = param.data.float()
+            for buffer in module.buffers():
+                if buffer.dtype == torch.float16:
+                    buffer.data = buffer.data.float()
+            for child in module.children():
+                convert_to_fp32(child)
+        
+        convert_to_fp32(model)
+        model = model.float()  # Also convert the model itself
+        
+        # Ensure model is in training mode (required by prepare_qat)
+        model.train()
+        
+        # Get default QAT qconfig
+        qconfig = quant.get_default_qat_qconfig(self.backend)
+        
+        # Recursively set qconfig ONLY on Linear modules
+        # This is critical: PyTorch's prepare_qat will fail if qconfig is set
+        # on modules that aren't actually quantizable Linear layers
+        def set_qconfig_recursive(module):
+            """Recursively set qconfig ONLY on Linear modules"""
+            # Only set qconfig on actual Linear layers
+            # Use type() to check exact type, not isinstance, to avoid subclasses
+            if type(module) == nn.Linear:
+                module.qconfig = qconfig
+            # Explicitly set qconfig to None for everything else
+            # This prevents PyTorch from trying to quantize non-quantizable modules
+            else:
+                # Don't set qconfig on container modules - let children handle it
+                # But do set to None on modules that might confuse PyTorch
+                if isinstance(module, (nn.Embedding, nn.LayerNorm, nn.Dropout, 
+                                      nn.MultiheadAttention, nn.Softmax, nn.GELU, 
+                                      nn.ReLU, nn.Tanh, nn.Sigmoid)):
+                    module.qconfig = None
+            
+            # Recursively process children
+            for child in module.children():
+                set_qconfig_recursive(child)
+        
+        # Set qconfig recursively on all modules
+        set_qconfig_recursive(model)
+        
+        # Explicitly set root model qconfig to None to prevent PyTorch from trying to convert it
+        # The qconfig on Linear children will be used for quantization
+        model.qconfig = None
         
         # Prepare QAT (inserts fake quantization modules)
-        model_prepared = quant.prepare_qat(model, inplace=False)
+        try:
+            model_prepared = quant.prepare_qat(model, inplace=False)
+        except AssertionError as e:
+            # If we get an assertion error, it might be due to module type mismatch
+            # Try a more conservative approach: only quantize Linear layers explicitly
+            print(f"Warning: Standard prepare_qat failed: {e}")
+            print("Attempting alternative quantization setup...")
+            
+            # Reset all qconfigs
+            def reset_qconfig(module):
+                if hasattr(module, 'qconfig'):
+                    module.qconfig = None
+                for child in module.children():
+                    reset_qconfig(child)
+            
+            reset_qconfig(model)
+            
+            # Only set qconfig on Linear layers using strict type checking
+            def set_linear_qconfig(module):
+                if type(module) == nn.Linear:
+                    module.qconfig = qconfig
+                for child in module.children():
+                    set_linear_qconfig(child)
+            
+            set_linear_qconfig(model)
+            # Don't set qconfig on root model in fallback - let children handle it
+            
+            # Try again with only Linear layers
+            model_prepared = quant.prepare_qat(model, inplace=False)
         
         return model_prepared
     

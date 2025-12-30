@@ -129,23 +129,41 @@ class ThreatAwareEmbedding(nn.Module):
         
         # Character embeddings
         char_emb = self.char_embedding(char_ids_flat)  # (B*L, C, D)
+        # CRITICAL: FORCE FP32 immediately - unconditional conversion
+        # Embedding outputs can be FP16 even when model is in FP32 mode
+        char_emb = char_emb.float()
         char_emb = char_emb.permute(0, 2, 1)  # (B*L, D, C)
         
         # Multi-scale convolutions
         conv_outputs = []
         for conv in self.char_convs:
             conv_out = F.relu(conv(char_emb))  # (B*L, channels, C)
+            # CRITICAL: FORCE FP32 immediately - unconditional conversion
+            # Conv outputs can be FP16 even when model is in FP32 mode
+            conv_out = conv_out.float()
             pooled = self.char_pool(conv_out).squeeze(-1)  # (B*L, channels)
+            # CRITICAL: FORCE FP32 immediately - unconditional conversion
+            # Pooling outputs can be FP16 even when model is in FP32 mode
+            pooled = pooled.float()
             conv_outputs.append(pooled)
         
         # Concatenate all scales
         char_features_flat = torch.cat(conv_outputs, dim=-1)  # (B*L, channels * num_kernels)
+        
+        # CRITICAL: FORCE FP32 before quantized layer - unconditional conversion
+        # Quantization observers REQUIRE FP32 inputs, not FP16
+        # Use .float() unconditionally - it's safe (no-op if already FP32)
+        # This ensures we NEVER pass FP16 to quantized layers
+        char_features_flat = char_features_flat.float()
         
         # Project to d_model
         char_features_flat = self.char_projection(char_features_flat)  # (B*L, d_model)
         
         # Reshape back
         char_features = char_features_flat.view(batch_size, seq_len, self.d_model)
+        
+        # CRITICAL: FORCE FP32 return value - unconditional conversion
+        char_features = char_features.float()
         
         return char_features
     
@@ -175,17 +193,30 @@ class ThreatAwareEmbedding(nn.Module):
         
         for name, detector in self.pattern_detectors.items():
             score = detector(input_ids, char_ids, text)  # (batch_size, 1)
+            # CRITICAL: FORCE FP32 immediately - unconditional conversion
+            # Detector outputs can be FP16 even when model is in FP32 mode
+            score = score.float()
             pattern_scores[name] = score
             detector_outputs.append(score)
         
         # Concatenate all detector scores
         pattern_tensor = torch.cat(detector_outputs, dim=-1)  # (batch_size, num_detectors)
         
+        # CRITICAL: FORCE FP32 before quantized layer - unconditional conversion
+        # Quantization observers REQUIRE FP32 inputs, not FP16
+        pattern_tensor = pattern_tensor.float()
+        
         # Project to d_model
         pattern_features = self.pattern_projection(pattern_tensor)  # (batch_size, d_model)
         
+        # CRITICAL: FORCE FP32 after projection - unconditional conversion
+        pattern_features = pattern_features.float()
+        
         # Broadcast to all sequence positions
         pattern_features = pattern_features.unsqueeze(1).expand(-1, seq_len, -1)
+        
+        # CRITICAL: FORCE FP32 after broadcasting - unconditional conversion
+        pattern_features = pattern_features.float()
         
         return pattern_features, pattern_scores
     
@@ -222,6 +253,9 @@ class ThreatAwareEmbedding(nn.Module):
         
         # 1. Token embeddings
         token_emb = self.token_embedding(normalized_input_ids)  # (B, L, D)
+        # CRITICAL: FORCE FP32 immediately - unconditional conversion
+        # Embedding outputs can be FP16 even when model is in FP32 mode
+        token_emb = token_emb.float()
         
         # Add position embeddings
         if position_ids is None:
@@ -229,33 +263,62 @@ class ThreatAwareEmbedding(nn.Module):
             position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
         
         position_emb = self.position_embedding(position_ids)
+        # CRITICAL: FORCE FP32 immediately - unconditional conversion
+        # Embedding outputs can be FP16 even when model is in FP32 mode
+        position_emb = position_emb.float()
         token_emb = token_emb + position_emb
+        # CRITICAL: FORCE FP32 after addition - unconditional conversion
+        token_emb = token_emb.float()
         
         # 2. Character-level features
         if char_ids is not None:
             char_features = self.extract_char_features(char_ids)
         else:
             # If no character IDs provided, use zero features
-            char_features = torch.zeros_like(token_emb)
+            # CRITICAL: FORCE FP32 even for zero tensors - unconditional conversion
+            char_features = torch.zeros_like(token_emb).float()
+        
+        # CRITICAL: FORCE FP32 - unconditional conversion
+        char_features = char_features.float()
         
         # 3. Pattern detection features
         pattern_features, pattern_scores = self.extract_pattern_features(
             normalized_input_ids, char_ids, text
         )
         
+        # CRITICAL: FORCE FP32 before concatenation - unconditional conversion
+        # Quantization observers REQUIRE FP32 inputs, not FP16
+        token_emb = token_emb.float()
+        char_features = char_features.float()
+        pattern_features = pattern_features.float()
+        
         # 4. Fusion (combine all modalities)
         # Concatenate: token + char + pattern
         combined = torch.cat([token_emb, char_features, pattern_features], dim=-1)
         
+        # CRITICAL: FORCE FP32 before fusion - unconditional conversion
+        combined = combined.float()
+        
         # Fuse through MLP
         fused_embeddings = self.fusion(combined)  # (B, L, D)
+        
+        # CRITICAL: FORCE FP32 after fusion - unconditional conversion
+        fused_embeddings = fused_embeddings.float()
         
         # Apply dropout
         fused_embeddings = self.dropout(fused_embeddings)
         
+        # CRITICAL: FORCE FP32 after dropout - unconditional conversion
+        fused_embeddings = fused_embeddings.float()
+        
         # Apply attention mask if provided
         if attention_mask is not None:
             fused_embeddings = fused_embeddings * attention_mask.unsqueeze(-1)
+            # CRITICAL: FORCE FP32 after mask multiplication - unconditional conversion
+            fused_embeddings = fused_embeddings.float()
+        
+        # CRITICAL: FORCE FP32 final output - unconditional conversion
+        fused_embeddings = fused_embeddings.float()
         
         return fused_embeddings, pattern_scores
     

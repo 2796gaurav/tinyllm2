@@ -46,7 +46,7 @@ model:
   # Adaptive Router
   router:
     hidden_dim: 128
-    complexity_threshold: 0.6  # 60% to fast, 40% to deep
+    complexity_threshold: 0.3  # ✅ FIXED: 0.3 for 70% fast, 30% deep
     use_learned_threshold: true
   
   # Bit-level response encoding
@@ -153,7 +153,7 @@ loss:
   
   # Auxiliary losses
   aux_loss_weight: 0.01  # MoE load balancing
-  router_loss_weight: 0.1  # Router optimization
+  router_loss_weight: 0.5  # ✅ INCREASED: Router optimization (enforce 70/30 split)
   pattern_loss_weight: 0.05  # Pattern detector calibration
   
   # Class weights (for imbalanced data)

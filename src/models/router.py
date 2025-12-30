@@ -117,6 +117,10 @@ class AdaptiveRouter(nn.Module):
         else:
             pooled = embeddings.mean(dim=1)  # (batch_size, d_model)
         
+        # CRITICAL: FORCE FP32 before quantized layer - unconditional conversion
+        # Quantization observers REQUIRE FP32 inputs, not FP16
+        pooled = pooled.float()
+        
         # 2. Estimate complexity
         complexity_score = self.complexity_estimator(pooled).squeeze(-1)  # (batch_size,)
         

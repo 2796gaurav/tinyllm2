@@ -4,6 +4,7 @@ transformers>=4.45.0
 accelerate>=0.34.0
 datasets>=2.20.0
 tokenizers>=0.20.0
+huggingface_hub>=0.23.0  # For HF_TOKEN authentication
 
 # Training & Optimization
 wandb>=0.17.0
@@ -11,6 +12,8 @@ optuna>=3.6.0
 deepspeed>=0.14.0  # Optional, for multi-GPU
 bitsandbytes>=0.43.0  # For INT4 quantization
 
+onnxscript
+onnxruntime
 # Data Processing
 pandas>=2.2.0
 numpy>=1.26.0
@@ -35,6 +38,7 @@ tensorboard>=2.17.0
 
 # Quantization & Export
 onnx>=1.16.0
+onnxscript>=0.1.0  # Required for ONNX export (PyTorch 2.0+)
 onnxruntime>=1.18.0
 onnxruntime-gpu>=1.18.0  # For GPU inference
 optimum>=1.21.0
@@ -44,6 +48,10 @@ fastapi>=0.111.0
 uvicorn>=0.30.0
 pydantic>=2.7.0
 python-multipart>=0.0.9
+
+# AWS SageMaker (for cloud training)
+boto3>=1.34.0
+sagemaker>=2.200.0
 
 # Utilities
 tqdm>=4.66.0

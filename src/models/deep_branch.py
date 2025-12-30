@@ -78,6 +78,10 @@ class MoELayer(nn.Module):
         # Flatten for expert routing
         hidden_states_flat = hidden_states.view(-1, d_model)  # (B*L, D)
         
+        # CRITICAL: FORCE FP32 before quantized layer - unconditional conversion
+        # Quantization observers REQUIRE FP32 inputs, not FP16
+        hidden_states_flat = hidden_states_flat.float()
+        
         # Compute router logits
         router_logits = self.gate(hidden_states_flat)  # (B*L, E)
         
@@ -103,6 +107,10 @@ class MoELayer(nn.Module):
             if expert_mask.any():
                 # Get tokens for this expert
                 expert_input = hidden_states_flat[expert_mask]  # (N_expert, D)
+                
+                # CRITICAL: FORCE FP32 before quantized layers in expert - unconditional conversion
+                # Quantization observers REQUIRE FP32 inputs, not FP16
+                expert_input = expert_input.float()
                 
                 # Forward through expert
                 expert_output = self.experts[expert_idx](expert_input)  # (N_expert, D)
@@ -307,6 +315,10 @@ class DeepMoEReasoner(nn.Module):
         else:
             pooled = hidden_states.mean(dim=1)
         
+        # CRITICAL: FORCE FP32 before quantized layers - unconditional conversion
+        # Quantization observers REQUIRE FP32 inputs, not FP16
+        pooled = pooled.float()
+        
         pooled = self.pooler(pooled)  # (B, D)
         
         # Classification
@@ -375,11 +387,19 @@ class MoETransformerLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.norm1(hidden_states)
         
+        # Convert attention_mask to key_padding_mask format
+        # attention_mask: 1=valid token, 0=padding
+        # key_padding_mask: True=mask out, False=attend to
+        key_padding_mask = None
+        if attention_mask is not None:
+            # Convert to bool and invert: 1 (valid) -> False (attend), 0 (padding) -> True (mask)
+            key_padding_mask = (attention_mask == 0).bool()
+        
         attn_output, _ = self.self_attn(
             query=hidden_states,
             key=hidden_states,
             value=hidden_states,
-            key_padding_mask=attention_mask if attention_mask is not None else None,
+            key_padding_mask=key_padding_mask,
             need_weights=False,
         )
         

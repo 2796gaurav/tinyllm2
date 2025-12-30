@@ -182,11 +182,19 @@ class TransformerEncoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.norm1(hidden_states)
         
+        # Convert attention_mask to key_padding_mask format
+        # attention_mask: 1=valid token, 0=padding
+        # key_padding_mask: True=mask out, False=attend to
+        key_padding_mask = None
+        if attention_mask is not None:
+            # Convert to bool and invert: 1 (valid) -> False (attend), 0 (padding) -> True (mask)
+            key_padding_mask = (attention_mask == 0).bool()
+        
         attn_output, _ = self.self_attn(
             query=hidden_states,
             key=hidden_states,
             value=hidden_states,
-            key_padding_mask=attention_mask if attention_mask is not None else None,
+            key_padding_mask=key_padding_mask,
             need_weights=False,
         )
         
@@ -195,6 +203,11 @@ class TransformerEncoderLayer(nn.Module):
         # Feed-forward
         residual = hidden_states
         hidden_states = self.norm2(hidden_states)
+        
+        # CRITICAL: FORCE FP32 before quantized layers in FFN - unconditional conversion
+        # Quantization observers REQUIRE FP32 inputs, not FP16
+        hidden_states = hidden_states.float()
+        
         hidden_states = self.ffn(hidden_states)
         hidden_states = residual + hidden_states
         
@@ -296,6 +309,10 @@ class FastPatternDetector(nn.Module):
         else:
             pooled = embeddings.mean(dim=1)  # (B, D)
         
+        # CRITICAL: FORCE FP32 before quantized layer - unconditional conversion
+        # Quantization observers REQUIRE FP32 inputs, not FP16
+        pooled = pooled.float()
+        
         pooled = self.pooler(pooled)  # (B, D)
         
         # Match against pattern bank
@@ -307,36 +324,42 @@ class FastPatternDetector(nn.Module):
         # 2. Decide: use pattern bank or transformer
         use_transformer = pattern_confidence < self.pattern_confidence_threshold
         
-        if use_transformer.any():
-            # Run lightweight transformer for uncertain samples
-            transformer_output = self.transformer(embeddings, attention_mask)
-            
-            # Pool transformer output
-            if attention_mask is not None:
-                mask_expanded = attention_mask.unsqueeze(-1).expand(transformer_output.size())
-                sum_output = (transformer_output * mask_expanded).sum(1)
-                sum_mask = mask_expanded.sum(1)
-                transformer_pooled = sum_output / sum_mask.clamp(min=1e-9)
-            else:
-                transformer_pooled = transformer_output.mean(dim=1)
-            
-            # Classify transformer output
-            transformer_logits = self.classifier(transformer_pooled)
-            
-            # Combine pattern and transformer logits based on confidence
-            # For high-confidence pattern matches, use pattern logits
-            # For low-confidence, use transformer logits
-            logits = torch.where(
-                use_transformer.unsqueeze(-1).expand(-1, self.num_labels),
-                transformer_logits,
-                pattern_logits,
-            )
+        # ONNX/torch.export compatible: Always execute transformer and use masking
+        # This avoids data-dependent control flow that torch.export cannot handle
+        # Run lightweight transformer for all samples (will be masked if not needed)
+        transformer_output = self.transformer(embeddings, attention_mask)
+        
+        # Pool transformer output
+        if attention_mask is not None:
+            mask_expanded = attention_mask.unsqueeze(-1).expand(transformer_output.size())
+            sum_output = (transformer_output * mask_expanded).sum(1)
+            sum_mask = mask_expanded.sum(1)
+            transformer_pooled = sum_output / sum_mask.clamp(min=1e-9)
         else:
-            # All samples are high-confidence pattern matches
-            logits = pattern_logits
+            transformer_pooled = transformer_output.mean(dim=1)
+        
+        # CRITICAL: FORCE FP32 before quantized layer - unconditional conversion
+        # Quantization observers REQUIRE FP32 inputs, not FP16
+        transformer_pooled = transformer_pooled.float()
+        
+        # Classify transformer output
+        transformer_logits = self.classifier(transformer_pooled)
+        
+        # Combine pattern and transformer logits based on confidence
+        # For high-confidence pattern matches, use pattern logits
+        # For low-confidence, use transformer logits
+        # ONNX-compatible: always compute both and use torch.where
+        logits = torch.where(
+            use_transformer.unsqueeze(-1).expand(-1, self.num_labels),
+            transformer_logits,
+            pattern_logits,
+        )
         
         # Confidence estimation
         if return_confidence:
+            # CRITICAL: FORCE FP32 before quantized layer - unconditional conversion
+            # Quantization observers REQUIRE FP32 inputs, not FP16
+            pooled = pooled.float()
             # Use pooled embedding for confidence
             confidence = self.confidence_head(pooled)  # (B, 1)
         else:
