@@ -49,14 +49,14 @@ model:
     complexity_threshold: 0.3  # ✅ FIXED: 0.3 for 70% fast, 30% deep
     use_learned_threshold: true
   
-  # Bit-level response encoding
+  # Bit-level response encoding (UPGRADED to 32-bit)
   bit_encoding:
     enabled: true
-    bits: 16
-    attack_type_bits: 4     # 0-15 categories
-    confidence_bits: 4      # 0-15 levels
-    severity_bits: 4        # 0-15 levels
-    action_bits: 4          # 0-15 actions
+    bits: 32                 # UPGRADED: 32-bit for better granularity
+    attack_type_bits: 8      # 0-255 categories (was 4)
+    confidence_bits: 8       # 0-255 levels (was 4)
+    severity_bits: 8         # 0-255 levels (was 4)
+    action_bits: 8           # 0-255 actions (was 4)
 
 # Data
 data:

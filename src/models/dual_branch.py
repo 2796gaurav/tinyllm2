@@ -66,9 +66,9 @@ class DualBranchConfig:
     attention_dropout: float = 0.1
     hidden_dropout: float = 0.1
     
-    # Bit-level encoding
+    # Bit-level encoding (UPGRADED to 32-bit)
     use_bit_encoding: bool = True
-    num_bits: int = 16
+    num_bits: int = 32  # UPGRADED: 32-bit for better granularity
     
     def __post_init__(self):
         if self.char_cnn_kernels is None:
@@ -459,28 +459,45 @@ class TinyGuardrail(nn.Module):
 class BitLevelEncoder(nn.Module):
     """
     Bit-level response encoder
-    Encodes classification into 16-bit integer
-    
-    Format:
+    Encodes classification into 16-bit or 32-bit integer
+
+    Format (16-bit):
     - Bits 0-3: Attack type (16 categories)
     - Bits 4-7: Confidence level (16 levels)
     - Bits 8-11: Severity (16 levels)
     - Bits 12-15: Suggested action (16 actions)
+
+    Format (32-bit - RECOMMENDED):
+    - Bits 0-7: Attack type (256 categories)
+    - Bits 8-15: Confidence level (256 levels, 0.0039 precision)
+    - Bits 16-23: Severity (256 levels)
+    - Bits 24-31: Action + Metadata (256 combinations)
     """
-    
-    def __init__(self, num_labels: int = 4, num_bits: int = 16):
+
+    def __init__(self, num_labels: int = 4, num_bits: int = 32):  # Changed default to 32-bit
         super().__init__()
-        
+
         self.num_labels = num_labels
         self.num_bits = num_bits
-        
-        # Severity estimator (learned)
-        self.severity_head = nn.Sequential(
-            nn.Linear(num_labels, 16),
-            nn.ReLU(),
-            nn.Linear(16, 16),
-            nn.Softmax(dim=-1),
-        )
+
+        # Enhanced severity estimator for 32-bit (256 levels instead of 16)
+        if num_bits == 32:
+            self.severity_head = nn.Sequential(
+                nn.Linear(num_labels, 32),  # Deeper network for better granularity
+                nn.ReLU(),
+                nn.Linear(32, 32),
+                nn.ReLU(),
+                nn.Linear(32, 256),  # 256 levels instead of 16
+                nn.Softmax(dim=-1),
+            )
+        else:
+            # Legacy 16-bit support
+            self.severity_head = nn.Sequential(
+                nn.Linear(num_labels, 16),
+                nn.ReLU(),
+                nn.Linear(16, 16),
+                nn.Softmax(dim=-1),
+            )
     
     def forward(
         self,
@@ -488,17 +505,24 @@ class BitLevelEncoder(nn.Module):
         confidence: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Encode to 16-bit integers
+        Encode to 16-bit or 32-bit integers
         
         Args:
             logits: (batch_size, num_labels)
             confidence: (batch_size, 1)
         
         Returns:
-            bits: (batch_size,) - 16-bit integers
+            bits: (batch_size,) - 16-bit or 32-bit integers
         """
         batch_size = logits.size(0)
         
+        if self.num_bits == 32:
+            return self._encode_32bit(logits, confidence)
+        else:
+            return self._encode_16bit(logits, confidence)
+
+    def _encode_16bit(self, logits: torch.Tensor, confidence: torch.Tensor) -> torch.Tensor:
+        """Legacy 16-bit encoding"""
         # 1. Attack type (bits 0-3)
         attack_type = torch.argmax(logits, dim=-1)  # (batch_size,)
         
@@ -522,6 +546,70 @@ class BitLevelEncoder(nn.Module):
         )
         
         return bits
+
+    def _encode_32bit(self, logits: torch.Tensor, confidence: torch.Tensor) -> torch.Tensor:
+        """Enhanced 32-bit encoding with 256× granularity"""
+        # 1. Attack type (bits 0-7) - 256 categories
+        attack_type = torch.argmax(logits, dim=-1)  # (batch_size,)
+        
+        # 2. Confidence level (bits 8-15) - 256 levels (0.0039 precision)
+        confidence_level = (confidence.squeeze(-1) * 255).long().clamp(0, 255)
+        
+        # 3. Severity (bits 16-23) - 256 levels
+        severity_probs = self.severity_head(logits)
+        severity = torch.argmax(severity_probs, dim=-1)
+        
+        # 4. Action + Metadata (bits 24-31) - 256 combinations
+        # Enhanced action mapping with metadata
+        action = self._get_enhanced_action(attack_type, confidence_level, severity)
+        
+        # Pack into 32-bit integer
+        bits = (
+            attack_type |
+            (confidence_level << 8) |
+            (severity << 16) |
+            (action << 24)
+        )
+        
+        return bits
+
+    def _get_enhanced_action(self, attack_type: torch.Tensor, confidence: torch.Tensor, severity: torch.Tensor) -> torch.Tensor:
+        """
+        Enhanced action mapping with metadata
+        
+        Action codes (256 possibilities):
+        - 0-31: Allow with various metadata
+        - 32-63: Warn with various metadata  
+        - 64-127: Block with various metadata
+        - 128-255: Escalate with various metadata
+        """
+        # Base action determination
+        is_benign = (attack_type == 0)
+        high_confidence = (confidence > 200)  # >78% confidence
+        high_severity = (severity > 200)    # High severity
+        
+        # Action logic
+        action = torch.zeros_like(attack_type)
+        
+        # Benign cases
+        action = torch.where(is_benign, torch.full_like(action, 0), action)  # 0 = Allow
+        
+        # Malicious cases - determine action based on confidence and severity
+        malicious_mask = ~is_benign
+        
+        # High confidence + high severity = Block (64)
+        block_mask = malicious_mask & high_confidence & high_severity
+        action = torch.where(block_mask, torch.full_like(action, 64), action)
+        
+        # High confidence but low severity = Warn (32)
+        warn_mask = malicious_mask & high_confidence & ~high_severity
+        action = torch.where(warn_mask, torch.full_like(action, 32), action)
+        
+        # Low confidence = Escalate for review (128)
+        escalate_mask = malicious_mask & ~high_confidence
+        action = torch.where(escalate_mask, torch.full_like(action, 128), action)
+        
+        return action
 
 
 @dataclass
